@@ -24,6 +24,23 @@ MARKET_INDEX_TICKER = "^JKSE"
 # Ambang ADX untuk strategi gorengan (20 = default longgar, 25 = lebih ketat/selektif)
 ADX_THRESHOLD_GORENGAN = 20.0
 
+# Ambang klasifikasi kualitas tren ADX (standar interpretasi Wilder):
+# < 20 = tidak ada tren, 20-25 = tren baru terbentuk (moderat), 25-40 = tren kuat,
+# > 40 = tren sangat kuat/ekstrem (waspada jenuh)
+ADX_TREN_MODERAT = 20.0
+ADX_TREN_KUAT = 25.0
+ADX_TREN_EKSTREM = 40.0
+
+# --- KONFIGURASI REKOMENDASI HARGA ENTRY DAYTRADING ---
+# Estimasi total biaya transaksi bolak-balik (fee beli ~0.15% + fee jual ~0.25%,
+# angka umum broker online Indonesia; sesuaikan dengan fee broker kamu)
+FEE_TRANSAKSI_TOTAL_PERSEN = 0.40
+# Profit bersih minimal (setelah fee) yang masih dianggap layak untuk daytrading.
+# Dipakai untuk menghitung "harga masuk maksimal yang masih memberikan profit":
+# harga tertinggi yang, jika target jual tercapai, masih menyisakan profit bersih
+# minimal sebesar angka ini.
+MIN_PROFIT_BERSIH_DAYTRADING_PERSEN = 2.0
+
 # Kelipatan ATR untuk menghitung TP/SL gorengan secara proporsional ke volatilitas saham,
 # menggantikan angka persentase flat (7% / 3.5%) yang sama rata untuk semua saham
 ATR_MULTIPLIER_SL = 1.5
