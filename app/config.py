@@ -42,9 +42,12 @@ FEE_TRANSAKSI_TOTAL_PERSEN = 0.40
 MIN_PROFIT_BERSIH_DAYTRADING_PERSEN = 2.0
 
 # Kelipatan ATR untuk menghitung TP/SL gorengan secara proporsional ke volatilitas saham,
-# menggantikan angka persentase flat (7% / 3.5%) yang sama rata untuk semua saham
+# menggantikan angka persentase flat (7% / 3.5%) yang sama rata untuk semua saham.
+# TP dinaikkan 3.0 -> 4.0 berdasarkan backtest gabungan watchlist gorengan (Agu 2026):
+# rata-rata return per transaksi naik ~+2.3% -> ~+3.2% dengan win rate sama (50%).
+# TP 5.0 tambahannya sudah tipis; trailing stop justru memperburuk hasil.
 ATR_MULTIPLIER_SL = 1.5
-ATR_MULTIPLIER_TP = 3.0
+ATR_MULTIPLIER_TP = 4.0
 
 # Alokasi bertingkat (persen) untuk 3 tranche average-down di strategi dividen.
 # Alokasi makin besar di level koreksi yang makin dalam.
@@ -67,15 +70,10 @@ MAX_ALOKASI_SWING_PERSEN = 15          # maks % modal per saham dividen/swing
 MAX_ALOKASI_GORENGAN_PERSEN = 5        # maks % modal per saham gorengan (lebih kecil, risiko tinggi)
 MAX_JUMLAH_GORENGAN_BERSAMAAN = 3      # saran jumlah maksimal posisi gorengan dibuka bersamaan
 
-# --- UNIVERSE SAHAM UNTUK SCREENER "SEMUA SAHAM IDX" ---
-# PENTING: Ini BUKAN daftar lengkap seluruh ~900 saham yang terdaftar di IDX.
-# Ini starter list ~100 ticker yang relatif likuid/dikenal luas, disusun dari
-# pengetahuan umum publik (bukan hasil scraping dataset pihak ketiga mana pun,
-# untuk menghindari isu lisensi/hak cipta atas kompilasi data tersebut).
-#
-# Kalau kamu mau cakupan penuh seluruh saham IDX, lengkapi list ini sendiri dari
-# sumber resmi: https://www.idx.co.id/id/perusahaan-tercatat/profil-perusahaan-tercatat
-# (unduh daftar resmi, lalu tambahkan kode ticker + akhiran ".JK" ke list ini).
+# --- UNIVERSE SAHAM UNTUK SCREENER (LEGACY) ---
+# CATATAN: endpoint /screener/*/semua-saham kini memakai daftar LENGKAP 941 saham
+# tercatat BEI di app/daftar_saham_bei.py, bukan lagi starter list ini.
+# List di bawah dipertahankan hanya untuk kompatibilitas / bahan watchlist manual.
 SEMUA_SAHAM_IDX_STARTER = [
     # Perbankan
     "BBCA.JK", "BBRI.JK", "BMRI.JK", "BBNI.JK", "BRIS.JK", "ARTO.JK", "BJBR.JK", "BJTM.JK", "BTPS.JK", "BNGA.JK",
