@@ -9,8 +9,10 @@ from app.config import (
     ATR_MULTIPLIER_SL, ATR_MULTIPLIER_TP,
     TRANCHE_ALLOKASI, BATAS_TOLERANSI_PENURUNAN_DIVIDEN,
     RETRY_PERCOBAAN_MAKSIMAL, RETRY_JEDA_DETIK,
-    MAX_ALOKASI_SWING_PERSEN, MAX_ALOKASI_GORENGAN_PERSEN, MAX_JUMLAH_GORENGAN_BERSAMAAN
+    MAX_ALOKASI_SWING_PERSEN, MAX_ALOKASI_GORENGAN_PERSEN, MAX_JUMLAH_GORENGAN_BERSAMAAN,
+    YIELD_MINIMAL_UNTUK_VALUASI_DIVIDEN
 )
+import datetime
 
 
 # =========================================================================
@@ -224,6 +226,44 @@ def hitung_zona_average_down(harga_sekarang, ema20, ema50, ema200, area_support_
 # STRATEGI 1: SWING-INVESTMENT DIVIDEN
 # =========================================================================
 
+def ambil_info_tanggal_dividen(info):
+    """
+    Coba ambil info tanggal terkait dividen dari Yahoo Finance.
+
+    PENTING - keterbatasan yang perlu disadari:
+    - Yahoo Finance TIDAK selalu punya data ini untuk saham IDX (cakupannya jauh lebih
+      lengkap untuk saham AS). Field kosong BUKAN berarti saham tidak bagi dividen,
+      bisa jadi cuma datanya tidak ter-cover Yahoo.
+    - 'exDividendDate' dari Yahoo itu EX-DATE (tanggal saham mulai diperdagangkan TANPA
+      hak dividen), BUKAN cum-date. Cum-date = hari bursa terakhir SEBELUM ex-date (hari
+      terakhir kamu masih dapat hak dividen kalau beli saat itu). Di sini cum-date
+      dihitung sebagai ESTIMASI (ex-date dikurangi 1 hari), bukan tanggal resmi.
+    - Untuk kepastian jadwal cum-date, recording date (tanggal pencatatan), dan payment
+      date (tanggal pembayaran) yang akurat, sumber otoritatifnya adalah pengumuman
+      aksi korporasi resmi di idx.co.id atau KSEI — bukan Yahoo Finance.
+    """
+    ex_date_epoch = info.get('exDividendDate')
+    if not ex_date_epoch:
+        return {
+            "tersedia": False,
+            "catatan": "Data tanggal dividen tidak tersedia di Yahoo Finance untuk saham ini. Cek jadwal resmi di idx.co.id atau KSEI."
+        }
+    try:
+        ex_date = datetime.datetime.utcfromtimestamp(ex_date_epoch).date()
+        cum_date_perkiraan = ex_date - datetime.timedelta(days=1)
+        return {
+            "tersedia": True,
+            "estimasi_cum_date": str(cum_date_perkiraan),
+            "ex_dividend_date": str(ex_date),
+            "catatan": "Cum-date di sini ESTIMASI (ex-date dikurangi 1 hari), bukan tanggal resmi. Verifikasi ke idx.co.id/KSEI sebelum mengambil keputusan berdasarkan tanggal ini."
+        }
+    except Exception:
+        return {
+            "tersedia": False,
+            "catatan": "Gagal memproses data tanggal dividen dari Yahoo Finance."
+        }
+
+
 def hitung_analisis_saham(ticker_symbol: str, kondisi_market: dict = None, df_riwayat: pd.DataFrame = None):
     """
     df_riwayat: opsional, DataFrame historis yang SUDAH ditarik sebelumnya (misal lewat
@@ -259,9 +299,20 @@ def hitung_analisis_saham(ticker_symbol: str, kondisi_market: dict = None, df_ri
     harga_wajar = int(eps * pe_acuan) if eps > 0 else int(harga_acuan)
 
     if total_dividen > 0:
-        harga_maks_layak_beli = int(total_dividen / TARGET_DIVIDEND_YIELD)
-        status_dividen = f"LAYAK ({round((total_dividen / (harga_acuan or 1)) * 100, 2)}% Yield)"
-        is_dividend_stock = True
+        dividend_yield_persen = round((total_dividen / (harga_acuan or 1)) * 100, 2)
+        if (dividend_yield_persen / 100) >= YIELD_MINIMAL_UNTUK_VALUASI_DIVIDEN:
+            # Yield cukup signifikan untuk dijadikan basis valuasi utama
+            harga_maks_layak_beli = int(total_dividen / TARGET_DIVIDEND_YIELD)
+            status_dividen = f"LAYAK ({dividend_yield_persen}% Yield)"
+            is_dividend_stock = True
+        else:
+            # Ada dividen tapi nominalnya receh - rumus dividend-yield di sini akan
+            # menghasilkan angka tidak masuk akal (jauh di bawah harga wajar fundamental),
+            # jadi fallback ke valuasi PE-based, dan diperlakukan sebagai bukan-dividend-stock
+            # untuk keperluan guardrail risiko (nggak ada 'bantalan dividen' yang berarti).
+            harga_maks_layak_beli = int(harga_wajar * 0.85)
+            status_dividen = f"ADA DIVIDEN TAPI KECIL ({dividend_yield_persen}% Yield, di bawah ambang {int(YIELD_MINIMAL_UNTUK_VALUASI_DIVIDEN * 100)}%) ⚠️"
+            is_dividend_stock = False
     else:
         harga_maks_layak_beli = int(harga_wajar * 0.85)
         status_dividen = "TIDAK ADA DIVIDEN ❌"
@@ -358,6 +409,23 @@ def hitung_analisis_saham(ticker_symbol: str, kondisi_market: dict = None, df_ri
     if not kondisi_market.get("market_bullish", True) and "BUY" in rekomendasi and not wajib_stop_loss:
         rekomendasi = f"{rekomendasi} (⚠️ IHSG sedang BEARISH, pertimbangkan kurangi ukuran posisi)"
 
+    # --- CROSS-CHECK VALUASI vs REKOMENDASI ---
+    # Rekomendasi berbasis teknikal/momentum (f2_kondisi dkk) dan harga_wajar berbasis
+    # fundamental itu 2 sistem yang independen - tanpa cross-check, sistem bisa dengan
+    # pede bilang "STRONG BUY" sementara harga sebenarnya sudah jauh di atas harga wajar,
+    # tanpa ada yang menandai kontradiksi ini. Field ini bikin kontradiksinya EKSPLISIT
+    # alih-alih tersembunyi di 2 angka berbeda yang harus dibandingkan manual oleh user.
+    premi_terhadap_wajar_persen = None
+    peringatan_valuasi = None
+    if harga_wajar > 0:
+        premi_terhadap_wajar_persen = round(((harga_sekarang - harga_wajar) / harga_wajar) * 100, 2)
+        if premi_terhadap_wajar_persen > 20 and ("BUY" in rekomendasi or "STRONG" in rekomendasi):
+            peringatan_valuasi = (
+                f"⚠️ Harga saat ini {premi_terhadap_wajar_persen}% DI ATAS estimasi harga wajar fundamental (Rp{harga_wajar}). "
+                f"Sinyal beli di atas murni berbasis momentum teknikal, BUKAN valuasi murah — "
+                f"risiko koreksi lebih besar kalau momentum berbalik arah."
+            )
+
     # --- E. TEXT PENJELASAN OTOMATIS ---
     posisi_pos = "di atas" if harga_sekarang > ema20 else "di bawah"
     vol_text = "disertai volume tinggi" if is_volume_strong else "dengan volume cenderung rendah"
@@ -387,7 +455,8 @@ def hitung_analisis_saham(ticker_symbol: str, kondisi_market: dict = None, df_ri
             "harga_maks_layak_beli": harga_maks_layak_beli,
             "pbv_ratio": round(pbv_ratio, 2) if pbv_ratio else "N/A",
             "return_on_equity": f"{round(return_on_equity * 100, 2)}%" if return_on_equity else "N/A",
-            "status_dividen": status_dividen
+            "status_dividen": status_dividen,
+            "info_tanggal_dividen": ambil_info_tanggal_dividen(info)
         },
         "teknikal": {
             "status_tren": status_tren,
@@ -395,6 +464,9 @@ def hitung_analisis_saham(ticker_symbol: str, kondisi_market: dict = None, df_ri
             "target_atap_resisten": f"Rp{resisten_terdekat} (Potensi ruang kenaikan: +{jarak_ke_resisten}%)",
             "ema20": ema20, "ema50": ema50, "ema200": ema200,
             "rsi_14": round(rsi, 2), "stochastic_d": round(stoch_d, 2), "adx_strength": round(adx, 2),
+            "macd": round(float(macd), 2),
+            "macd_signal": round(float(terakhir['MACD_Signal']), 2),
+            "macd_histogram": round(float(histogram_sekarang), 2),
             "status_arus_modal": status_arus_modal,
             "konfirmasi_oversold_swing": status_forum_swing,
             "oversold_swing_aktif": bool(f1_kondisi),
@@ -412,6 +484,8 @@ def hitung_analisis_saham(ticker_symbol: str, kondisi_market: dict = None, df_ri
         "zona_average_down": zona_average_down,
         "guardrail_fundamental": guardrail_fundamental,
         "manajemen_risiko": manajemen_risiko,
+        "premi_terhadap_harga_wajar_persen": premi_terhadap_wajar_persen,
+        "peringatan_valuasi": peringatan_valuasi,
         "rekomendasi_akhir": rekomendasi
     }
 
