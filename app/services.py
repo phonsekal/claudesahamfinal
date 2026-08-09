@@ -66,11 +66,18 @@ def _ambil_info_dengan_retry(saham):
     """
     Retry pengambilan .info sampai RETRY_PERCOBAAN_MAKSIMAL kali kalau Yahoo Finance
     gagal sesaat / balikin data kosong (transient error), sebelum benar-benar dianggap gagal.
+
+    CATATAN: sebelumnya fungsi ini mewajibkan field 'trailingEps' ada, yang bikin saham
+    kecil/kurang ter-cover Yahoo Finance (misal VAST) selalu gagal walau data harga &
+    teknikalnya sebenarnya tersedia. Sekarang cukup ada SALAH SATU sumber harga acuan
+    (previousClose / currentPrice / regularMarketPrice) — bagian fundamental yang hilang
+    akan di-fallback ke nilai default di hitung_analisis_saham, bukan bikin seluruh
+    analisis gagal total.
     """
     for percobaan in range(RETRY_PERCOBAAN_MAKSIMAL):
         try:
             info = saham.info
-            if info and 'trailingEps' in info:
+            if info and (info.get('previousClose') or info.get('currentPrice') or info.get('regularMarketPrice')):
                 return info
         except Exception:
             pass
@@ -99,6 +106,8 @@ def hitung_indikator_lengkap(df, period=14):
     df['EMA12'] = df['Close'].ewm(span=12, adjust=False).mean()
     df['EMA26'] = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = df['EMA12'] - df['EMA26']
+    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df['MACD_Histogram'] = df['MACD'] - df['MACD_Signal']
 
     df['UpMove'] = df['High'].diff()
     df['DownMove'] = df['Low'].diff()
@@ -244,11 +253,14 @@ def hitung_analisis_saham(ticker_symbol: str, kondisi_market: dict = None, df_ri
         total_dividen = int(divs.resample('YE').sum().iloc[-1]) if not divs.empty else 0
 
     pe_acuan = PE_WAJAR_BANK if "Bank" in info.get('industry', '') else PE_WAJAR_UMUM
-    harga_wajar = int(eps * pe_acuan) if eps > 0 else int(info.get('previousClose', 0))
+    # Fallback berjenjang untuk harga acuan (beberapa saham kecil tidak selalu punya
+    # semua field ini terisi di Yahoo Finance)
+    harga_acuan = info.get('previousClose') or info.get('currentPrice') or info.get('regularMarketPrice') or 0
+    harga_wajar = int(eps * pe_acuan) if eps > 0 else int(harga_acuan)
 
     if total_dividen > 0:
         harga_maks_layak_beli = int(total_dividen / TARGET_DIVIDEND_YIELD)
-        status_dividen = f"LAYAK ({round((total_dividen / info.get('previousClose', 1)) * 100, 2)}% Yield)"
+        status_dividen = f"LAYAK ({round((total_dividen / (harga_acuan or 1)) * 100, 2)}% Yield)"
         is_dividend_stock = True
     else:
         harga_maks_layak_beli = int(harga_wajar * 0.85)
@@ -288,7 +300,22 @@ def hitung_analisis_saham(ticker_symbol: str, kondisi_market: dict = None, df_ri
     status_arus_modal = "PANIC SELLING / INSTITUSI KELUAR ⚠️" if is_panic_selling else "ARUS KAS STABIL / NORMAL 👍"
 
     f1_kondisi = harga_sekarang < ema20 and harga_sekarang > ema200 and stoch_d <= 20 and macd < 0
-    status_forum_swing = "AKTIF 🔥" if f1_kondisi else "TIDAK AKTIF 💤"
+
+    # --- DETEKSI MACD BULLISH CROSSOVER DI BAWAH GARIS NOL ("Early Rebound / Bottoming Signal") ---
+    # Beda dengan f1_kondisi (yang cuma cek MACD < 0 secara statis), ini mendeteksi EVENT
+    # garis MACD baru saja cross ke ATAS garis Signal-nya, sementara nilai MACD-nya sendiri
+    # masih di bawah 0 - dianggap sinyal awal pembalikan sebelum tren beneran naik.
+    histogram_sekarang = terakhir['MACD_Histogram']
+    histogram_kemarin = df['MACD_Histogram'].iloc[-2] if len(df) >= 2 else histogram_sekarang
+    macd_crossover_bullish = (histogram_kemarin <= 0) and (histogram_sekarang > 0)
+    sinyal_macd_early_rebound = bool(macd_crossover_bullish and macd < 0)
+
+    if f1_kondisi and sinyal_macd_early_rebound:
+        status_forum_swing = "SANGAT AKTIF 🔥🔄 (Oversold + MACD Bullish Crossover)"
+    elif f1_kondisi:
+        status_forum_swing = "AKTIF 🔥"
+    else:
+        status_forum_swing = "TIDAK AKTIF 💤"
 
     f2_kondisi = (ema20 > ema50) and (rsi >= 50) and (adx > 20) and (plus_di > minus_di) and (harga_sekarang > ema200) and is_volume_strong
     status_forum_day = "TREN SANGAT KUAT 🚀" if f2_kondisi else "TREN LEMAH / SIDEWAYS 💤"
@@ -370,6 +397,8 @@ def hitung_analisis_saham(ticker_symbol: str, kondisi_market: dict = None, df_ri
             "rsi_14": round(rsi, 2), "stochastic_d": round(stoch_d, 2), "adx_strength": round(adx, 2),
             "status_arus_modal": status_arus_modal,
             "konfirmasi_oversold_swing": status_forum_swing,
+            "oversold_swing_aktif": bool(f1_kondisi),
+            "macd_early_rebound_terdeteksi": sinyal_macd_early_rebound,
             "konfirmasi_daytrading_adx": status_forum_day,
             "penjelasan_chart": penjelasan_chart,
             "panduan_saran_growin": panduan_saran_growin
