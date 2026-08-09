@@ -12,7 +12,8 @@ from app.config import (
     MAX_ALOKASI_SWING_PERSEN, MAX_ALOKASI_GORENGAN_PERSEN, MAX_JUMLAH_GORENGAN_BERSAMAAN,
     YIELD_MINIMAL_UNTUK_VALUASI_DIVIDEN,
     ADX_TREN_MODERAT, ADX_TREN_KUAT, ADX_TREN_EKSTREM,
-    FEE_TRANSAKSI_TOTAL_PERSEN, MIN_PROFIT_BERSIH_DAYTRADING_PERSEN
+    FEE_TRANSAKSI_TOTAL_PERSEN, MIN_PROFIT_BERSIH_DAYTRADING_PERSEN,
+    MIN_RASIO_RISK_REWARD_DAYTRADING, RSI_MAKS_UNTUK_ENTRY_DAYTRADING
 )
 import datetime
 
@@ -227,24 +228,50 @@ def interpretasi_arus_bandar_cmf(cmf):
 
 
 def hitung_rekomendasi_entry_daytrading(harga_sekarang, ema_pullback, atr, target_jual,
-                                        adx, plus_di, minus_di):
+                                        adx, plus_di, minus_di, rsi=None, filter_lolos=True,
+                                        alasan_filter_gagal=None):
     """
-    Rekomendasi harga masuk untuk daytrading saat tren ADX bagus.
+    Rekomendasi harga masuk untuk daytrading. HANYA aktif jika seluruh guard lolos:
 
-    - harga_entry_terbaik: antre limit beli di area pullback sehat — sekitar EMA acuan
-      atau setengah ATR di bawah harga sekarang (mana yang lebih tinggi), supaya tidak
-      mengejar harga di pucuk.
-    - harga_masuk_maksimal: harga TERTINGGI yang masih layak dibeli. Di atas harga ini,
-      kalaupun target jual tercapai, profit bersih setelah fee broker sudah di bawah
-      ambang minimal (MIN_PROFIT_BERSIH_DAYTRADING_PERSEN) — artinya risk/reward tidak
-      lagi sepadan.
+    1. filter_lolos — kalau strategi pemanggil punya filter utama (mis. screening
+       gorengan 3-syarat) dan filter itu GAGAL, tidak boleh ada rekomendasi harga
+       (dulu bisa muncul entry padahal status filter GAGAL — menyesatkan).
+    2. Kualitas tren ADX (>= 20 dan DI+ dominan).
+    3. RSI belum jenuh beli ekstrem (< RSI_MAKS_UNTUK_ENTRY_DAYTRADING) — menolak
+       entry di harga parabolik (kasus CBPE: RSI 90).
+    4. Risk/reward dari entry terbaik minimal MIN_RASIO_RISK_REWARD_DAYTRADING —
+       tren kuat dengan ruang profit sempit tetap setup buruk (kasus KBLV: RR ~1:1).
+
+    Harga yang dihasilkan:
+    - harga_entry_terbaik: antre limit beli di area pullback sehat.
+    - harga_masuk_maksimal: batas atas harga beli yang masih layak — dibatasi TIGA hal:
+      profit bersih minimal ke target, risk/reward minimal terhadap stop loss, dan
+      TIDAK PERNAH di atas harga sekarang (mencegah 'mengejar' harga).
     """
     kualitas = nilai_kualitas_tren_adx(adx, plus_di, minus_di)
+
+    if not filter_lolos:
+        return {
+            "aktif": False,
+            "kualitas_tren_adx": kualitas,
+            "keterangan": f"❌ TIDAK ADA REKOMENDASI ENTRY — filter utama strategi GAGAL{f' ({alasan_filter_gagal})' if alasan_filter_gagal else ''}. Sinyal tren saja tidak cukup tanpa konfirmasi filter."
+        }
+
     if not kualitas["tren_bagus_untuk_daytrading"]:
         return {
             "aktif": False,
             "kualitas_tren_adx": kualitas,
             "keterangan": "Tren ADX belum memenuhi syarat daytrading (butuh ADX >= 20 dengan DI+ dominan). Tidak ada rekomendasi harga masuk."
+        }
+
+    if rsi is not None and float(rsi) >= RSI_MAKS_UNTUK_ENTRY_DAYTRADING:
+        return {
+            "aktif": False,
+            "kualitas_tren_adx": kualitas,
+            "keterangan": (
+                f"❌ SETUP DITOLAK — RSI {round(float(rsi), 1)} sudah jenuh beli ekstrem (ambang {int(RSI_MAKS_UNTUK_ENTRY_DAYTRADING)}). "
+                f"Tren memang kuat, tapi masuk sekarang = membeli di pucuk euforia, rawan koreksi tajam. Tunggu pullback dan RSI mendingin."
+            )
         }
 
     if not (atr and atr > 0) or harga_sekarang <= 0 or target_jual <= harga_sekarang:
@@ -256,14 +283,34 @@ def hitung_rekomendasi_entry_daytrading(harga_sekarang, ema_pullback, atr, targe
 
     entry_terbaik = min(harga_sekarang, max(ema_pullback, harga_sekarang - 0.5 * atr))
     entry_terbaik = bulatkan_ke_tick_idx(entry_terbaik, ke_bawah=True)
-
-    faktor_biaya = 1 + (FEE_TRANSAKSI_TOTAL_PERSEN + MIN_PROFIT_BERSIH_DAYTRADING_PERSEN) / 100
-    harga_masuk_maksimal = bulatkan_ke_tick_idx(target_jual / faktor_biaya, ke_bawah=True)
-
     stop_loss = bulatkan_ke_tick_idx(entry_terbaik - (ATR_MULTIPLIER_SL * atr), ke_bawah=True)
-    potensi_profit_dari_entry = round(float((target_jual - entry_terbaik) / entry_terbaik) * 100 - FEE_TRANSAKSI_TOTAL_PERSEN, 2)
 
-    harga_sudah_kemahalan = bool(harga_sekarang > harga_masuk_maksimal)
+    # --- GUARD RISK/REWARD ---
+    risiko_poin = entry_terbaik - stop_loss
+    reward_poin = target_jual - entry_terbaik
+    rasio_rr = round(float(reward_poin) / risiko_poin, 2) if risiko_poin > 0 else 0.0
+    estimasi_profit_persen = round(float((target_jual - entry_terbaik) / entry_terbaik) * 100 - FEE_TRANSAKSI_TOTAL_PERSEN, 2)
+    estimasi_rugi_persen = round(float((stop_loss - entry_terbaik) / entry_terbaik) * 100 - FEE_TRANSAKSI_TOTAL_PERSEN, 2)
+
+    if rasio_rr < MIN_RASIO_RISK_REWARD_DAYTRADING:
+        return {
+            "aktif": False,
+            "kualitas_tren_adx": kualitas,
+            "rasio_risk_reward": rasio_rr,
+            "estimasi_profit_bersih_persen": estimasi_profit_persen,
+            "estimasi_rugi_ke_sl_persen": estimasi_rugi_persen,
+            "keterangan": (
+                f"❌ SETUP BURUK, LEWATKAN — potensi profit ke target ({estimasi_profit_persen}%) tidak sepadan dengan potensi rugi ke stop loss ({estimasi_rugi_persen}%). "
+                f"Rasio reward:risk hanya {rasio_rr}, minimal layak {MIN_RASIO_RISK_REWARD_DAYTRADING}. Tren kuat bukan berarti setup layak."
+            )
+        }
+
+    # Batas masuk maksimal = yang PALING KETAT dari 3 syarat:
+    # (1) profit bersih minimal ke target, (2) RR minimal terhadap SL, (3) harga sekarang
+    faktor_biaya = 1 + (FEE_TRANSAKSI_TOTAL_PERSEN + MIN_PROFIT_BERSIH_DAYTRADING_PERSEN) / 100
+    maks_dari_profit = target_jual / faktor_biaya
+    maks_dari_rr = (target_jual + MIN_RASIO_RISK_REWARD_DAYTRADING * stop_loss) / (1 + MIN_RASIO_RISK_REWARD_DAYTRADING)
+    harga_masuk_maksimal = bulatkan_ke_tick_idx(min(maks_dari_profit, maks_dari_rr, harga_sekarang), ke_bawah=True)
 
     return {
         "aktif": True,
@@ -272,15 +319,15 @@ def hitung_rekomendasi_entry_daytrading(harga_sekarang, ema_pullback, atr, targe
         "harga_masuk_maksimal": harga_masuk_maksimal,
         "target_jual": bulatkan_ke_tick_idx(target_jual, ke_bawah=True),
         "stop_loss_disarankan": stop_loss,
-        "estimasi_profit_bersih_dari_entry_terbaik_persen": potensi_profit_dari_entry,
+        "rasio_risk_reward": rasio_rr,
+        "estimasi_profit_bersih_dari_entry_terbaik_persen": estimasi_profit_persen,
+        "estimasi_rugi_ke_sl_dari_entry_terbaik_persen": estimasi_rugi_persen,
         "keterangan": (
-            f"⚠️ Harga sekarang (Rp{harga_sekarang}) SUDAH DI ATAS harga masuk maksimal (Rp{harga_masuk_maksimal}). "
-            f"Mengejar di harga ini membuat profit bersih ke target jual di bawah {MIN_PROFIT_BERSIH_DAYTRADING_PERSEN}% setelah fee — lebih bijak menunggu pullback ke area entry terbaik."
-            if harga_sudah_kemahalan else
-            f"Antre limit beli di area Rp{entry_terbaik} (entry terbaik). Masih boleh masuk sampai maksimal Rp{harga_masuk_maksimal} — "
-            f"di atas itu profit bersih ke target Rp{bulatkan_ke_tick_idx(target_jual, ke_bawah=True)} tidak lagi menutup fee + ambang profit minimal {MIN_PROFIT_BERSIH_DAYTRADING_PERSEN}%."
+            f"Antre limit beli di area Rp{entry_terbaik} (entry terbaik). Batas masuk maksimal Rp{harga_masuk_maksimal} — "
+            f"JANGAN mengejar di atas itu. Skenario dari entry terbaik: profit ke target Rp{bulatkan_ke_tick_idx(target_jual, ke_bawah=True)} = {estimasi_profit_persen}%, "
+            f"rugi jika stop loss Rp{stop_loss} tersentuh = {estimasi_rugi_persen}% (rasio reward:risk {rasio_rr})."
         ),
-        "asumsi": f"Fee transaksi bolak-balik {FEE_TRANSAKSI_TOTAL_PERSEN}%, profit bersih minimal {MIN_PROFIT_BERSIH_DAYTRADING_PERSEN}%. Harga sudah dibulatkan ke fraksi harga resmi BEI."
+        "asumsi": f"Fee transaksi bolak-balik {FEE_TRANSAKSI_TOTAL_PERSEN}%, profit bersih minimal {MIN_PROFIT_BERSIH_DAYTRADING_PERSEN}%, rasio RR minimal {MIN_RASIO_RISK_REWARD_DAYTRADING}. Harga dibulatkan ke fraksi harga resmi BEI."
     }
 
 
@@ -416,14 +463,48 @@ def cek_guardrail_fundamental(saham, info):
 
 
 def hitung_zona_average_down(harga_sekarang, ema20, ema50, ema200, area_support_kuat):
-    """Tiga tingkat area akumulasi untuk strategi dividen tanpa cut loss."""
-    level_3 = area_support_kuat if area_support_kuat > 0 else ema200
-    return {
-        "tranche_1": {"area_harga": ema20, "alokasi_persen": TRANCHE_ALLOKASI[0], "keterangan": "Koreksi ringan, dekat EMA20"},
-        "tranche_2": {"area_harga": ema50, "alokasi_persen": TRANCHE_ALLOKASI[1], "keterangan": "Koreksi sedang, dekat EMA50"},
-        "tranche_3": {"area_harga": level_3, "alokasi_persen": TRANCHE_ALLOKASI[2], "keterangan": "Koreksi dalam, dekat area support kuat / EMA200"},
-        "catatan": "Alokasi bertahap ini asumsi guardrail_fundamental.aman_untuk_average_down bernilai true. Jika false, evaluasi ulang sebelum menambah posisi."
-    }
+    """
+    Area akumulasi bertahap untuk strategi dividen tanpa cut loss.
+
+    Hanya level yang berada DI BAWAH harga sekarang yang dipakai, diurutkan menurun
+    (koreksi ringan -> dalam). Dulu level diambil mentah dari EMA20/50/200 — saat harga
+    berada di bawah EMA200 (tren turun), "zona koreksi dalam" malah nyangkut DI ATAS
+    harga sekarang (kasus BMRI & BBCA) dan menyuruh beli lebih mahal. Sekarang level
+    yang tidak relevan dibuang, dan alokasi disesuaikan dengan jumlah level tersisa.
+    """
+    kandidat = []
+    for nama, level in [("EMA20", ema20), ("EMA50", ema50), ("EMA200", ema200),
+                        ("area support kuat", area_support_kuat)]:
+        if level and level > 0 and level < harga_sekarang:
+            level_int = int(level)
+            if all(abs(level_int - k[1]) / harga_sekarang > 0.005 for k in kandidat):  # buang level dempet (<0.5%)
+                kandidat.append((nama, level_int))
+
+    kandidat.sort(key=lambda k: -k[1])
+    kandidat = kandidat[:3]
+
+    if not kandidat:
+        return {
+            "tersedia": False,
+            "catatan": ("Tidak ada level acuan (EMA20/50/200/support) di bawah harga sekarang — harga sedang berada "
+                        "di bawah semua garis acuan (tren turun dalam). Fokus TAHAN posisi yang ada; tunggu struktur "
+                        "harga pulih sebelum merencanakan average down.")
+        }
+
+    alokasi_map = {1: [100], 2: [40, 60], 3: TRANCHE_ALLOKASI}
+    alokasi = alokasi_map[len(kandidat)]
+    label_koreksi = ["Koreksi ringan", "Koreksi sedang", "Koreksi dalam"]
+
+    hasil = {"tersedia": True}
+    for i, (nama, level) in enumerate(kandidat):
+        hasil[f"tranche_{i + 1}"] = {
+            "area_harga": level,
+            "alokasi_persen": alokasi[i],
+            "keterangan": f"{label_koreksi[i]}, dekat {nama}"
+        }
+    hasil["catatan"] = ("Alokasi bertahap ini asumsi guardrail_fundamental.aman_untuk_average_down bernilai true. "
+                        "Jika false, evaluasi ulang sebelum menambah posisi.")
+    return hasil
 
 
 # =========================================================================
@@ -589,14 +670,16 @@ def hitung_analisis_saham(ticker_symbol: str, kondisi_market: dict = None, df_ri
         ema_pullback=ema20,
         atr=atr_terakhir,
         target_jual=target_jual_daytrading,
-        adx=adx, plus_di=plus_di, minus_di=minus_di
+        adx=adx, plus_di=plus_di, minus_di=minus_di,
+        rsi=rsi
     )
 
     # --- D. LOGIKA GUARDRAIL & STRATEGI ---
     wajib_stop_loss = beta > 1.3 or not is_dividend_stock
 
     if wajib_stop_loss:
-        kategori_risiko = f"TINGGI (Beta: {round(beta, 2)}) 🔥"
+        alasan_risiko = "Beta tinggi" if beta > 1.3 else "tanpa bantalan dividen yang berarti"
+        kategori_risiko = f"TINGGI ({alasan_risiko}; Beta: {round(beta, 2)}) 🔥"
         status_proteksi = "MURNI TRADING CEPAT (Wajib Stop Loss)"
         status_tren = "UPTREND SPEKULATIF 📈" if harga_sekarang > ema20 else "DOWNTREND SPEKULATIF 📉"
         rekomendasi = "WAIT/TRADING CEPAT - SET STOP LOSS DI GROWIN KETAT 3-5%!"
@@ -619,6 +702,12 @@ def hitung_analisis_saham(ticker_symbol: str, kondisi_market: dict = None, df_ri
         else:
             status_tren = "KONSOLIDASI 📊"
             rekomendasi = "WAIT AND SEE"
+
+    # Kualifikasi label tren: "UPTREND" versi EMA20/EMA50 itu kerangka jangka menengah.
+    # Kalau harga masih di bawah EMA200, tren BESAR masih turun — tanpa kualifikasi ini
+    # label terkesan lebih optimis dari kondisi sebenarnya (kasus BBCA).
+    if "UPTREND" in status_tren and harga_sekarang < ema200:
+        status_tren += " — JANGKA MENENGAH (harga masih di bawah EMA200, tren besar belum pulih ⚠️)"
 
     if f1_kondisi and not wajib_stop_loss and not is_panic_selling:
         rekomendasi = "BUY ON WEAKNESS ★★★ (Konfirmasi Oversold Forum Aktif!)"
@@ -646,12 +735,20 @@ def hitung_analisis_saham(ticker_symbol: str, kondisi_market: dict = None, df_ri
                 f"Sinyal beli di atas murni berbasis momentum teknikal, BUKAN valuasi murah — "
                 f"risiko koreksi lebih besar kalau momentum berbalik arah."
             )
+        elif "BUY" in rekomendasi and harga_maks_layak_beli > 0 and harga_sekarang > harga_maks_layak_beli:
+            # Guard khusus strategi dividen: sinyal beli teknikal boleh muncul, tapi kalau
+            # harga sudah di atas batas layak beli, yield efektif yang dikunci makin tipis —
+            # dulu kasus ini lolos tanpa peringatan selama premi < 20% (kasus BBCA +12.6%).
+            peringatan_valuasi = (
+                f"⚠️ Harga saat ini (Rp{harga_sekarang}) DI ATAS batas maks layak beli (Rp{harga_maks_layak_beli}). "
+                f"Sinyal beli ini murni soal TIMING teknikal — untuk strategi dividen, menambah posisi di harga ini "
+                f"mengunci yield efektif yang lebih rendah. Pertimbangkan menunggu harga kembali ke bawah batas layak beli."
+            )
 
     # --- E. TEXT PENJELASAN OTOMATIS ---
     posisi_pos = "di atas" if harga_sekarang > ema20 else "di bawah"
     vol_text = "disertai volume tinggi" if is_volume_strong else "dengan volume cenderung rendah"
     penjelasan_chart = f"Harga {ticker_symbol.upper()} (Rp{harga_sekarang}) berada {posisi_pos} garis acuan EMA 20 (Rp{ema20}). Pergerakan harian berjalan {vol_text}. Grafik menunjukkan kondisi {status_tren}. Arus institusi saat ini terdeteksi {status_arus_modal}."
-    panduan_saran_growin = f"1. Pasang Auto Order Beli pertama sedekat mungkin dengan lantai EMA 20 di area Rp{ema20}. 2. Jika Anda menerapkan investasi jangka panjang tanpa cut loss, siapkan peluru serok kedua di area benteng EMA 50 (Rp{ema50}). 3. Set jaring jual otomatis Take Profit GTC langsung di atap resisten Rp{resisten_terdekat}."
 
     # --- F. ZONA AVERAGE DOWN + GUARDRAIL FUNDAMENTAL ---
     zona_average_down = None
@@ -662,11 +759,51 @@ def hitung_analisis_saham(ticker_symbol: str, kondisi_market: dict = None, df_ri
         if not guardrail_fundamental["aman_untuk_average_down"]:
             rekomendasi = f"{rekomendasi} | ⚠️ GUARDRAIL FUNDAMENTAL AKTIF: pertimbangkan HENTIKAN average down, cek alasan di field guardrail_fundamental"
 
+    # --- PANDUAN STRATEGI (dibangun SETELAH zona average down supaya konsisten) ---
+    # Dulu panduan selalu memakai template dividen (antre beli EMA20, serok EMA50) untuk
+    # SEMUA saham — termasuk saham spekulatif non-dividen (kasus KBLV/CBPE) dan level
+    # yang berada di atas harga sekarang. Sekarang templatenya mengikuti kategori saham.
+    if wajib_stop_loss:
+        if rekomendasi_daytrading.get("aktif"):
+            panduan_saran_growin = (
+                f"Saham ini kategori MURNI TRADING CEPAT (bukan saham dividen) — JANGAN average down. "
+                f"Jika ingin trading: antre limit beli di area Rp{rekomendasi_daytrading['harga_entry_terbaik']}, "
+                f"pasang stop loss otomatis Rp{rekomendasi_daytrading['stop_loss_disarankan']} BERSAMAAN dengan order beli, "
+                f"target jual Rp{rekomendasi_daytrading['target_jual']}. Jangan beli di atas Rp{rekomendasi_daytrading['harga_masuk_maksimal']}."
+            )
+        else:
+            panduan_saran_growin = (
+                "Saham ini kategori MURNI TRADING CEPAT (bukan saham dividen) dan saat ini TIDAK ADA setup entry "
+                "yang layak (lihat alasan di rekomendasi_daytrading). Jangan antre beli, jangan average down — tunggu setup berikutnya."
+            )
+    elif zona_average_down and zona_average_down.get("tersedia"):
+        t1 = zona_average_down["tranche_1"]["area_harga"]
+        panduan_saran_growin = (
+            f"1. Pasang Auto Order Beli pertama di area koreksi terdekat Rp{t1} (lihat detail bertahap di zona_average_down). "
+            f"2. Alokasikan dana bertahap sesuai tranche — jangan habiskan peluru di satu level. "
+            f"3. Set jaring jual otomatis Take Profit GTC di atap resisten Rp{resisten_terdekat}."
+        )
+    else:
+        panduan_saran_growin = (
+            f"Harga sedang berada di bawah semua garis acuan (tren turun dalam) — belum ada zona beli bertahap yang sehat. "
+            f"Fokus TAHAN posisi yang ada selama guardrail fundamental aman, dan set jaring jual Take Profit GTC di resisten Rp{resisten_terdekat} bila ingin mengurangi posisi saat pantulan."
+        )
+
     # --- G. SARAN MANAJEMEN RISIKO POSISI (stateless, cuma saran batas, bukan tracking) ---
-    manajemen_risiko = {
-        "maks_alokasi_modal_persen": MAX_ALOKASI_SWING_PERSEN,
-        "keterangan": "Saran batas alokasi modal ke SATU saham ini. Sistem tidak melacak posisi lain yang sudah kamu buka (stateless), jadi total across saham tetap perlu kamu catat manual."
-    }
+    # Saham kategori spekulatif (wajib stop loss) memakai batas alokasi gorengan yang
+    # lebih kecil, bukan batas 15% saham dividen (dulu selalu 15% — kasus KBLV/CBPE).
+    if wajib_stop_loss:
+        manajemen_risiko = {
+            "maks_alokasi_modal_persen": MAX_ALOKASI_GORENGAN_PERSEN,
+            "keterangan": (f"Saham ini kategori spekulatif — batas alokasi mengikuti aturan trading cepat "
+                           f"({MAX_ALOKASI_GORENGAN_PERSEN}% modal), BUKAN batas {MAX_ALOKASI_SWING_PERSEN}% saham dividen. "
+                           "Sistem stateless: total alokasi lintas saham tetap kamu catat manual.")
+        }
+    else:
+        manajemen_risiko = {
+            "maks_alokasi_modal_persen": MAX_ALOKASI_SWING_PERSEN,
+            "keterangan": "Saran batas alokasi modal ke SATU saham ini. Sistem tidak melacak posisi lain yang sudah kamu buka (stateless), jadi total across saham tetap perlu kamu catat manual."
+        }
 
     return {
         "saham": ticker_symbol.upper(),
@@ -767,15 +904,36 @@ def hitung_momentum_gorengan(ticker_symbol: str, df_riwayat: pd.DataFrame = None
 
     trailing_stop_saran = bulatkan_ke_tick_idx(ema5, ke_bawah=True) if harga_sekarang > ema5 else cl_level
 
-    # Rekomendasi harga masuk (entry terbaik + batas masuk maksimal yang masih profit)
-    # saat tren ADX intraday bagus. EMA5 dipakai sebagai acuan pullback intraday.
+    # Status filter ditentukan DULU — rekomendasi entry harus tunduk pada filter ini.
+    # Dulu rekomendasi entry bisa muncul dengan harga lengkap padahal status GAGAL
+    # (kasus KBLV) — aplikasi seperti bilang "jangan trading" dan "ini harga entrinya"
+    # dalam satu output.
+    filter_lolos = bool(is_volume_spike and is_bullish_momentum and is_trend_explosive)
+    if filter_lolos:
+        status_filter = "LOLOS SCREENING 🔥 (Ledakan ADX + Bandar Masuk!)"
+    else:
+        syarat_gagal = []
+        if not is_volume_spike:
+            syarat_gagal.append("volume belum meledak > 2.5x rata-rata")
+        if not is_bullish_momentum:
+            syarat_gagal.append("struktur EMA intraday belum bullish")
+        if not is_trend_explosive:
+            syarat_gagal.append("ADX/arah tren belum memenuhi")
+        status_filter = "GAGAL 💤"
+        alasan_gagal = ", ".join(syarat_gagal)
+
+    # Rekomendasi harga masuk hanya saat filter LOLOS + semua guard lolos (RSI belum
+    # overbought ekstrem, risk/reward layak). EMA5 = acuan pullback intraday.
     atr_val = float(atr) if pd.notna(atr) and atr > 0 else harga_sekarang * 0.02
     rekomendasi_entry = hitung_rekomendasi_entry_daytrading(
         harga_sekarang=harga_sekarang,
         ema_pullback=float(ema5),
         atr=atr_val,
         target_jual=float(tp_level),
-        adx=float(adx), plus_di=float(plus_di), minus_di=float(minus_di)
+        adx=float(adx), plus_di=float(plus_di), minus_di=float(minus_di),
+        rsi=float(rsi) if pd.notna(rsi) else None,
+        filter_lolos=filter_lolos,
+        alasan_filter_gagal=None if filter_lolos else alasan_gagal
     )
 
     try:
@@ -783,10 +941,6 @@ def hitung_momentum_gorengan(ticker_symbol: str, df_riwayat: pd.DataFrame = None
         beta = info.get('beta', 1.8) if info else 1.8
     except Exception:
         beta = 1.8
-
-    status_filter = "GAGAL 💤"
-    if is_volume_spike and is_bullish_momentum and is_trend_explosive:
-        status_filter = "LOLOS SCREENING 🔥 (Ledakan ADX + Bandar Masuk!)"
 
     manajemen_risiko = {
         "maks_alokasi_modal_persen": MAX_ALOKASI_GORENGAN_PERSEN,
@@ -817,13 +971,25 @@ def hitung_momentum_gorengan(ticker_symbol: str, df_riwayat: pd.DataFrame = None
             "arus_bandar": f"CMF {arus_bandar_cmf['cmf_20']} — {arus_bandar_cmf['status']}. {arus_bandar_cmf['penjelasan']}"
         },
         "rekomendasi_entry_daytrading": rekomendasi_entry,
+        # Bracket order hanya ditampilkan saat ada sinyal masuk yang sah — dulu TP/SL
+        # tetap dihitung & tampil saat filter GAGAL, seolah-olah ada rencana trading.
         "bracket_order_growin": {
             "target_take_profit": tp_level,
             "batas_cut_loss": cl_level,
             "trailing_stop_saran": trailing_stop_saran,
             "metode": metode_tp_sl
-        },
+        } if (filter_lolos and rekomendasi_entry.get("aktif")) else None,
         "manajemen_risiko": manajemen_risiko,
-        "peringatan_keamanan": "RESIKO EKSTREM! Pergerakan harga murni ledakan tren momentum intraday.",
-        "rekomendasi_aksi": "DAY TRADING CEPAT - WAJIB LANGSUNG SET AUTO ORDER STOP LOSS DI GROWIN!"
+        "peringatan_keamanan": (
+            "RESIKO EKSTREM! Pergerakan harga murni ledakan tren momentum intraday."
+            if filter_lolos else
+            "Saham kategori risiko ekstrem, dan saat ini TIDAK ADA sinyal masuk yang sah."
+        ),
+        "rekomendasi_aksi": (
+            "DAY TRADING CEPAT - WAJIB LANGSUNG SET AUTO ORDER STOP LOSS DI GROWIN!"
+            if (filter_lolos and rekomendasi_entry.get("aktif")) else
+            (f"JANGAN TRADING SAHAM INI SEKARANG — filter momentum GAGAL ({alasan_gagal}). Tunggu seluruh syarat menyala bersamaan."
+             if not filter_lolos else
+             "JANGAN TRADING SAHAM INI SEKARANG — filter lolos tapi setup ditolak guard keamanan (lihat alasan di rekomendasi_entry_daytrading).")
+        )
     }
