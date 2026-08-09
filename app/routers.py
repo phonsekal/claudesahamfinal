@@ -124,6 +124,8 @@ def _jalankan_screener_gorengan(daftar_ticker: list):
                     "status": data.get("status_filter"),
                     "rsi_momentum": data.get("indikator", {}).get("rsi_momentum"),
                     "adx_power": data.get("indikator", {}).get("adx_power"),
+                    "kualitas_tren_adx": data.get("indikator", {}).get("kualitas_tren_adx"),
+                    "rekomendasi_entry_daytrading": data.get("rekomendasi_entry_daytrading"),
                     "bracket_order_growin": data.get("bracket_order_growin"),
                     "manajemen_risiko": data.get("manajemen_risiko"),
                     "rekomendasi": data.get("rekomendasi_aksi")
