@@ -3,6 +3,13 @@ TARGET_DIVIDEND_YIELD = 0.07
 PE_WAJAR_BANK = 12.0
 PE_WAJAR_UMUM = 15.0
 
+# Ambang minimal yield dividen supaya dianggap layak jadi BASIS VALUASI utama.
+# Saham yang secara teknis bagi dividen tapi nominalnya receh (di bawah ambang ini)
+# diperlakukan seperti saham non-dividen untuk keperluan valuasi (pakai harga wajar
+# PE-based sebagai acuan), bukan rumus dividend-yield yang bisa menghasilkan angka
+# tidak masuk akal untuk yield yang sangat kecil.
+YIELD_MINIMAL_UNTUK_VALUASI_DIVIDEN = 0.01  # 1%
+
 # Watchlist awal untuk strategi Swing-Investment Dividen (Big & Medium Caps)
 INDEX_BLUECHIP_UTAMA = ["BBRI.JK", "BMRI.JK", "BBNI.JK", "BBCA.JK", "ASII.JK", "TLKM.JK", "UNVR.JK", "PTBA.JK", "ADRO.JK", "ANTM.JK", "ICBP.JK", "INDF.JK", "AMRT.JK", "SIDO.JK"]
 
