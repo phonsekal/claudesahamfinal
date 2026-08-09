@@ -147,6 +147,14 @@ def hitung_indikator_lengkap(df, period=14):
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10))
     df['ADX14'] = dx.ewm(alpha=1 / period, adjust=False).mean()
 
+    # Chaikin Money Flow 20-periode: proxy "arus bandar" dari data harga+volume.
+    # Mengukur apakah volume lebih banyak terjadi saat harga ditutup dekat HIGH
+    # (tekanan beli / akumulasi) atau dekat LOW (tekanan jual / distribusi).
+    # Bukan pengganti broker summary asli, tapi menangkap fenomena yang sama
+    # tanpa butuh sumber data berbayar.
+    mfm = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / (df['High'] - df['Low'] + 1e-10)
+    df['CMF20'] = (mfm * df['Volume']).rolling(window=20).sum() / (df['Volume'].rolling(window=20).sum() + 1e-10)
+
     return df
 
 
@@ -190,6 +198,32 @@ def nilai_kualitas_tren_adx(adx, plus_di, minus_di):
         "kekuatan": label,
         "arah": "BULLISH (DI+ dominan)" if arah_bullish else "BEARISH (DI- dominan)"
     }
+
+
+def interpretasi_arus_bandar_cmf(cmf):
+    """
+    Terjemahkan nilai Chaikin Money Flow jadi status arus bandar yang mudah dibaca.
+    Ambang +/-0.05 dan +/-0.15 adalah konvensi umum interpretasi CMF.
+    """
+    if cmf is None or (isinstance(cmf, float) and pd.isna(cmf)):
+        return {"cmf_20": None, "status": "TIDAK TERSEDIA", "penjelasan": "Data belum cukup untuk menghitung CMF 20-periode."}
+    cmf = float(cmf)
+    if cmf >= 0.15:
+        status = "AKUMULASI KUAT 🟢🟢"
+        penjelasan = "Volume terkonsentrasi saat harga ditutup dekat high — indikasi kuat ada pihak besar mengakumulasi."
+    elif cmf >= 0.05:
+        status = "AKUMULASI 🟢"
+        penjelasan = "Tekanan beli lebih dominan dari tekanan jual dalam 20 periode terakhir."
+    elif cmf > -0.05:
+        status = "NETRAL ⚪"
+        penjelasan = "Tidak ada dominasi arus dana yang jelas — pasar seimbang."
+    elif cmf > -0.15:
+        status = "DISTRIBUSI 🔴"
+        penjelasan = "Tekanan jual lebih dominan — hati-hati, ada indikasi pihak besar mengurangi posisi."
+    else:
+        status = "DISTRIBUSI KUAT 🔴🔴"
+        penjelasan = "Volume terkonsentrasi saat harga ditutup dekat low — indikasi kuat distribusi besar sedang berlangsung."
+    return {"cmf_20": round(cmf, 3), "status": status, "penjelasan": penjelasan}
 
 
 def hitung_rekomendasi_entry_daytrading(harga_sekarang, ema_pullback, atr, target_jual,
@@ -251,7 +285,7 @@ def hitung_rekomendasi_entry_daytrading(harga_sekarang, ema_pullback, atr, targe
 
 
 def buat_penjelasan_teknikal(rsi, stoch_d, macd, macd_signal, adx, plus_di, minus_di,
-                             harga_sekarang, ema20, ema50, ema200, is_volume_strong):
+                             harga_sekarang, ema20, ema50, ema200, is_volume_strong, cmf=None):
     """Penjelasan singkat per indikator dalam bahasa sederhana, dihasilkan dari nilai aktual."""
     if rsi >= 70:
         rsi_text = f"RSI {round(rsi, 1)} — jenuh beli (overbought), rawan koreksi jangka pendek."
@@ -292,7 +326,7 @@ def buat_penjelasan_teknikal(rsi, stoch_d, macd, macd_signal, adx, plus_di, minu
                 if is_volume_strong else
                 "Volume di bawah ambang 1.5x rata-rata — pergerakan harga belum dikonfirmasi volume, rawan sinyal palsu.")
 
-    return {
+    hasil = {
         "rsi": rsi_text,
         "stochastic": stoch_text,
         "macd": macd_text,
@@ -300,6 +334,10 @@ def buat_penjelasan_teknikal(rsi, stoch_d, macd, macd_signal, adx, plus_di, minu
         "posisi_ema": ema_text,
         "volume": vol_text
     }
+    if cmf is not None:
+        arus = interpretasi_arus_bandar_cmf(cmf)
+        hasil["arus_bandar"] = f"CMF {arus['cmf_20']} — {arus['status']}. {arus['penjelasan']}"
+    return hasil
 
 
 def cek_kekuatan_support_dan_resisten(df, harga_sekarang, window_hari=60, toleransi_persen=0.015):
@@ -506,6 +544,8 @@ def hitung_analisis_saham(ticker_symbol: str, kondisi_market: dict = None, df_ri
     ema20, ema50, ema200 = int(terakhir['EMA20']), int(terakhir['EMA50']), int(terakhir['EMA200'])
     macd, stoch_d, rsi = terakhir['MACD'], terakhir['Stoch_D'], terakhir['RSI14']
     adx, plus_di, minus_di = terakhir['ADX14'], terakhir['+DI14'], terakhir['-DI14']
+    cmf_terakhir = terakhir['CMF20'] if 'CMF20' in df.columns else None
+    arus_bandar_cmf = interpretasi_arus_bandar_cmf(cmf_terakhir)
 
     volume_terakhir = int(terakhir['Volume'])
     volume_rata_rata = int(df['Volume'].tail(20).mean())
@@ -650,6 +690,7 @@ def hitung_analisis_saham(ticker_symbol: str, kondisi_market: dict = None, df_ri
             "macd_signal": round(float(terakhir['MACD_Signal']), 2),
             "macd_histogram": round(float(histogram_sekarang), 2),
             "status_arus_modal": status_arus_modal,
+            "arus_bandar_cmf": arus_bandar_cmf,
             "konfirmasi_oversold_swing": status_forum_swing,
             "oversold_swing_aktif": bool(f1_kondisi),
             "macd_early_rebound_terdeteksi": sinyal_macd_early_rebound,
@@ -657,7 +698,7 @@ def hitung_analisis_saham(ticker_symbol: str, kondisi_market: dict = None, df_ri
             "rekomendasi_daytrading": rekomendasi_daytrading,
             "penjelasan_indikator": buat_penjelasan_teknikal(
                 rsi, stoch_d, macd, float(terakhir['MACD_Signal']), adx, plus_di, minus_di,
-                harga_sekarang, ema20, ema50, ema200, is_volume_strong
+                harga_sekarang, ema20, ema50, ema200, is_volume_strong, cmf=cmf_terakhir
             ),
             "penjelasan_chart": penjelasan_chart,
             "panduan_saran_growin": panduan_saran_growin
@@ -706,6 +747,7 @@ def hitung_momentum_gorengan(ticker_symbol: str, df_riwayat: pd.DataFrame = None
     ema5, ema10 = terakhir['EMA5'], terakhir['EMA10']
     rsi, adx, plus_di, minus_di = terakhir['RSI14'], terakhir['ADX14'], terakhir['+DI14'], terakhir['-DI14']
     atr = terakhir['ATR14']
+    arus_bandar_cmf = interpretasi_arus_bandar_cmf(terakhir['CMF20'] if 'CMF20' in df.columns else None)
 
     volume_terakhir = terakhir['Volume']
     volume_rata_rata = df['Volume'].iloc[:-1].tail(35).mean()
@@ -761,6 +803,7 @@ def hitung_momentum_gorengan(ticker_symbol: str, df_riwayat: pd.DataFrame = None
             "rsi_momentum": round(rsi, 2),
             "adx_power": round(adx, 2),
             "kualitas_tren_adx": nilai_kualitas_tren_adx(float(adx), float(plus_di), float(minus_di)),
+            "arus_bandar_cmf": arus_bandar_cmf,
             "atr_volatilitas": round(float(atr), 2) if pd.notna(atr) else "N/A",
             "tingkat_volatilitas_beta": round(beta, 2)
         },
@@ -770,7 +813,8 @@ def hitung_momentum_gorengan(ticker_symbol: str, df_riwayat: pd.DataFrame = None
             "momentum": ("Harga di atas EMA5 > EMA10 — momentum intraday bullish."
                          if is_bullish_momentum else "Struktur EMA intraday belum bullish (harga belum di atas EMA5>EMA10)."),
             "adx": (f"ADX {round(float(adx), 1)} dengan DI+ dominan — tren intraday sedang meledak."
-                    if is_trend_explosive else f"ADX {round(float(adx), 1)} — tren intraday belum cukup kuat/arah belum bullish.")
+                    if is_trend_explosive else f"ADX {round(float(adx), 1)} — tren intraday belum cukup kuat/arah belum bullish."),
+            "arus_bandar": f"CMF {arus_bandar_cmf['cmf_20']} — {arus_bandar_cmf['status']}. {arus_bandar_cmf['penjelasan']}"
         },
         "rekomendasi_entry_daytrading": rekomendasi_entry,
         "bracket_order_growin": {
