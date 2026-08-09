@@ -79,7 +79,7 @@ def _jalankan_screener_swing(daftar_ticker: list):
                 saham_gagal.append(symbol)
                 continue
             teknikal = data.get("teknikal", {})
-            if "AKTIF" in teknikal.get("konfirmasi_oversold_swing", ""):
+            if teknikal.get("oversold_swing_aktif"):
                 saham_lolos.append({
                     "saham": data.get("saham"),
                     "harga_saat_ini": data.get("harga_saat_ini"),
