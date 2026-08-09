@@ -9,7 +9,8 @@ from app.backtest import (
     backtest_swing_dividen, backtest_gorengan_momentum,
     backtest_watchlist_swing, backtest_watchlist_gorengan
 )
-from app.config import INDEX_BLUECHIP_UTAMA, WATCHLIST_GORENGAN, SEMUA_SAHAM_IDX_STARTER
+from app.config import INDEX_BLUECHIP_UTAMA, WATCHLIST_GORENGAN
+from app.daftar_saham_bei import SEMUA_SAHAM_BEI
 
 router = APIRouter(prefix="/v1")
 
@@ -85,6 +86,7 @@ def _jalankan_screener_swing(daftar_ticker: list):
                     "harga_saat_ini": data.get("harga_saat_ini"),
                     "status_tren": teknikal.get("status_tren"),
                     "konfirmasi_oversold_swing": teknikal.get("konfirmasi_oversold_swing"),
+                    "arus_bandar_cmf": teknikal.get("arus_bandar_cmf"),
                     "status_dividen": data.get("fundamental", {}).get("status_dividen"),
                     "zona_average_down": data.get("zona_average_down"),
                     "guardrail_fundamental": data.get("guardrail_fundamental"),
@@ -125,6 +127,7 @@ def _jalankan_screener_gorengan(daftar_ticker: list):
                     "rsi_momentum": data.get("indikator", {}).get("rsi_momentum"),
                     "adx_power": data.get("indikator", {}).get("adx_power"),
                     "kualitas_tren_adx": data.get("indikator", {}).get("kualitas_tren_adx"),
+                    "arus_bandar_cmf": data.get("indikator", {}).get("arus_bandar_cmf"),
                     "rekomendasi_entry_daytrading": data.get("rekomendasi_entry_daytrading"),
                     "bracket_order_growin": data.get("bracket_order_growin"),
                     "manajemen_risiko": data.get("manajemen_risiko"),
@@ -158,15 +161,15 @@ async def run_screener_gorengan_momentum():
 @router.get("/screener/swing-dividen/semua-saham")
 async def run_screener_swing_semua_saham(offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=BATAS_LIMIT_MAKSIMAL_PER_PANGGILAN)):
     """
-    Screener swing-dividen atas starter universe SEMUA_SAHAM_IDX_STARTER (bukan cuma
+    Screener swing-dividen atas SELURUH daftar saham tercatat BEI (bukan cuma
     watchlist bluechip). DIPAGINASI karena scan seluruh saham IDX tidak muat dalam
     1 request serverless — panggil berulang dengan offset berbeda untuk cover semua.
     Contoh: offset=0&limit=50, lalu offset=50&limit=50, dst.
     """
-    total_saham = len(SEMUA_SAHAM_IDX_STARTER)
-    slice_ticker = SEMUA_SAHAM_IDX_STARTER[offset: offset + limit]
+    total_saham = len(SEMUA_SAHAM_BEI)
+    slice_ticker = SEMUA_SAHAM_BEI[offset: offset + limit]
     if not slice_ticker:
-        raise HTTPException(status_code=404, detail=f"Offset {offset} di luar jangkauan. Total saham di starter list: {total_saham}.")
+        raise HTTPException(status_code=404, detail=f"Offset {offset} di luar jangkauan. Total saham di daftar BEI: {total_saham}.")
 
     kondisi_market, saham_lolos, saham_gagal = _jalankan_screener_swing(slice_ticker)
     offset_berikutnya = offset + limit if (offset + limit) < total_saham else None
@@ -174,7 +177,7 @@ async def run_screener_swing_semua_saham(offset: int = Query(0, ge=0), limit: in
     return {
         "status": "success",
         "kondisi_market": kondisi_market,
-        "total_saham_di_starter_list": total_saham,
+        "total_saham_di_daftar_bei": total_saham,
         "diproses_offset": offset,
         "diproses_limit": limit,
         "offset_berikutnya": offset_berikutnya,
@@ -186,17 +189,17 @@ async def run_screener_swing_semua_saham(offset: int = Query(0, ge=0), limit: in
 @router.get("/screener/gorengan-momentum/semua-saham")
 async def run_screener_gorengan_semua_saham(offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=BATAS_LIMIT_MAKSIMAL_PER_PANGGILAN)):
     """Sama seperti swing/semua-saham tapi untuk strategi momentum gorengan. Juga dipaginasi."""
-    total_saham = len(SEMUA_SAHAM_IDX_STARTER)
-    slice_ticker = SEMUA_SAHAM_IDX_STARTER[offset: offset + limit]
+    total_saham = len(SEMUA_SAHAM_BEI)
+    slice_ticker = SEMUA_SAHAM_BEI[offset: offset + limit]
     if not slice_ticker:
-        raise HTTPException(status_code=404, detail=f"Offset {offset} di luar jangkauan. Total saham di starter list: {total_saham}.")
+        raise HTTPException(status_code=404, detail=f"Offset {offset} di luar jangkauan. Total saham di daftar BEI: {total_saham}.")
 
     saham_lolos, saham_gagal = _jalankan_screener_gorengan(slice_ticker)
     offset_berikutnya = offset + limit if (offset + limit) < total_saham else None
 
     return {
         "status": "success",
-        "total_saham_di_starter_list": total_saham,
+        "total_saham_di_daftar_bei": total_saham,
         "diproses_offset": offset,
         "diproses_limit": limit,
         "offset_berikutnya": offset_berikutnya,
