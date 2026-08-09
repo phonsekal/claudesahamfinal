@@ -41,6 +41,17 @@ FEE_TRANSAKSI_TOTAL_PERSEN = 0.40
 # minimal sebesar angka ini.
 MIN_PROFIT_BERSIH_DAYTRADING_PERSEN = 2.0
 
+# Rasio minimal potensi profit dibanding potensi rugi (reward:risk) supaya sebuah
+# setup daytrading dianggap layak. Di bawah ini, setup ditolak walau tren ADX kuat —
+# contoh kasus: KBLV Agu 2026, tren kuat tapi jarak ke resisten hampir sama dengan
+# jarak ke stop loss (rasio ~1:1) = ekspektasi matematis buruk.
+MIN_RASIO_RISK_REWARD_DAYTRADING = 1.5
+
+# Batas RSI maksimal untuk masih memberi rekomendasi entry daytrading. Di atas ini
+# harga dianggap parabolik/jenuh beli ekstrem (contoh kasus: CBPE dengan RSI 90) —
+# masuk di kondisi ini artinya membeli di pucuk euforia.
+RSI_MAKS_UNTUK_ENTRY_DAYTRADING = 80.0
+
 # Kelipatan ATR untuk menghitung TP/SL gorengan secara proporsional ke volatilitas saham,
 # menggantikan angka persentase flat (7% / 3.5%) yang sama rata untuk semua saham.
 # TP dinaikkan 3.0 -> 4.0 berdasarkan backtest gabungan watchlist gorengan (Agu 2026):
